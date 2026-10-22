@@ -693,6 +693,7 @@ function vFinancas(){
     return html;
   }
   // Resumo
+  html += `<button class="btn block" style="margin-top:12px" data-act="report">${ic('i-note')}Exportar relatório DRE (PDF)</button>`;
   const sg = v => (v < 0 ? '− ' : '') + money(Math.abs(v));
   html += `<div class="sec"><h2>Balanço de ${mName}</h2></div><div class="group">
     <div class="balrow"><span>Entradas<small>Recebido ${money(inRec)} de ${money(inTot)}</small></span><b class="money" style="color:var(--ok)">${money(inTot)}</b></div>
@@ -1018,6 +1019,261 @@ function removeIncs(ids, stopGroup){
   if (stopGroup) S.incomes.forEach(y => { if (y.group === stopGroup) y.recur = false; });
   save(); closeSheet(); render(); toast(ids.length > 1 ? `${ids.length} entradas excluídas` : 'Entrada excluída');
 }
+/* ============ Relatório DRE (PDF) ============ */
+const DRE_GROUPS = [
+  { key:'ess', label:'DESPESAS ESSENCIAIS', cats:['moradia','casa','mercado','saude','transporte','educacao'] },
+  { key:'pes', label:'DESPESAS PESSOAIS E ESTILO DE VIDA', cats:['lazer','assinaturas','outros'] },
+  { key:'fin', label:'ENCARGOS FINANCEIROS E TRIBUTOS', cats:['cartao','impostos'] },
+];
+const LOTUS_PATHS = "<path d='M60 4C71 16 74 36 60 54C46 36 49 16 60 4Z'/><path d='M18 18C38 17 54 31 58 52M18 18C19 30 24 40 33 46M102 18C82 17 66 31 62 52M102 18C101 30 96 40 87 46'/><path d='M4 60C24 42 52 44 72 64C56 76 26 76 4 60Z'/><path d='M116 60C96 44 72 46 54 62M116 60C100 74 80 76 66 70'/>";
+let REP = { period:'month' };
+
+function reportMonths(p, m){
+  if (p === 'q3') return [-2,-1,0].map(k => monthAdd(m, k));
+  if (p === 'y12') return [...Array(12)].map((_,i) => monthAdd(m, i-11));
+  if (p === 'ytd') { const n = Number(m.slice(5,7)); return [...Array(n)].map((_,i) => monthAdd(m, i-n+1)); }
+  return [m];
+}
+function periodLabel(ms){
+  if (ms.length === 1) return fmtMonth(ms[0]);
+  const f = mm => fmtMonth(mm,{month:'short', year:'numeric'}).replace('.','').replace(' de ','/');
+  return `${f(ms[0])} a ${f(ms[ms.length-1])}`;
+}
+// Regime de competência: contas pelo vencimento, entradas pela data prevista
+function reportData(months){
+  const set = new Set(months), t = today();
+  const bills = S.bills.filter(b => set.has(b.due.slice(0,7)));
+  const incs = S.incomes.filter(x => set.has(x.date.slice(0,7)));
+  const inc = {}, exp = {};
+  Object.keys(ICATS).forEach(k => inc[k] = { p:0, r:0 });
+  Object.keys(CATS).forEach(k => exp[k] = { p:0, r:0 });
+  incs.forEach(x => { const k = ICATS[x.cat] ? x.cat : 'outros', v = incVal(x); inc[k].p += v; if (x.received) inc[k].r += v; });
+  let juros = 0, desc = 0;
+  bills.forEach(b => { const k = CATS[b.cat] ? b.cat : 'outros'; exp[k].p += b.amount; if (b.paid) { exp[k].r += b.amount; const d = paidVal(b) - b.amount; if (d > 0) juros += d; else desc -= d; } });
+  const recP = sum(Object.values(inc), v => v.p), recR = sum(Object.values(inc), v => v.r);
+  const groups = DRE_GROUPS.map(g => {
+    let p = sum(g.cats, k => exp[k].p), r = sum(g.cats, k => exp[k].r);
+    if (g.key === 'fin') { p += juros - desc; r += juros - desc; }
+    return Object.assign({}, g, { p, r });
+  });
+  const despP = sum(groups, g => g.p), despR = sum(groups, g => g.r);
+  const open = bills.filter(b => !b.paid).sort(byDue);
+  const monthly = months.map(mm => {
+    const bs = bills.filter(b => b.due.slice(0,7) === mm), is = incs.filter(x => x.date.slice(0,7) === mm);
+    return { mm, rec: sum(is, incVal), desp: sum(bs, b => b.paid ? paidVal(b) : b.amount) };
+  });
+  const top = Object.entries(exp).sort((a,b) => b[1].p - a[1].p)[0];
+  return { inc, exp, juros, desc, recP, recR, groups, despP, despR, resP: recP - despP, resR: recR - despR,
+    open, openSum: sum(open, b => b.amount), late: open.filter(b => b.due < t), monthly, top: top && top[1].p ? top : null, count: bills.length + incs.length };
+}
+
+function loadJsPDF(){
+  if (window.jspdf) return Promise.resolve();
+  return new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'; s.onload = res; s.onerror = () => { s.remove(); rej(); }; document.head.appendChild(s); });
+}
+function lotusPNG(){
+  return new Promise(res => {
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 80' width='360' height='240'><g fill='none' stroke='#D4AF37' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'>${LOTUS_PATHS}</g></svg>`;
+    const img = new Image();
+    img.onload = () => { const c = document.createElement('canvas'); c.width = 360; c.height = 240; c.getContext('2d').drawImage(img, 0, 0, 360, 240); try { res(c.toDataURL('image/png')); } catch(e){ res(null); } };
+    img.onerror = () => res(null);
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  });
+}
+// carrega a biblioteca e a logo antes do toque em "Gerar", para o compartilhamento do iPhone não ser bloqueado
+function prepReport(){
+  if (!REP.prep) REP.prep = Promise.all([loadJsPDF(), REP.logo ? 0 : lotusPNG().then(p => REP.logo = p)]).catch(e => { REP.prep = null; throw e; });
+  return REP.prep;
+}
+
+function openReport(){ prepReport().catch(() => {}); drawReport(); }
+function drawReport(){
+  const m = UI.finMonth || today().slice(0,7), ms = reportMonths(REP.period, m), D = reportData(ms);
+  openSheet(`
+  <div class="sh-head"><h3>Relatório DRE</h3><button class="iconbtn" data-act="close" aria-label="Fechar">${ic('i-x')}</button></div>
+  <p class="hint" style="margin:-4px 2px 14px">Demonstrativo de resultado das suas finanças: entradas, despesas por grupo e quanto sobrou — em PDF, pronto para salvar ou enviar.</p>
+  <div class="field"><label>Período</label><div class="opts">${[['month','Mês'],['q3','Últimos 3 meses'],['ytd','Ano até o mês'],['y12','Últimos 12 meses']].map(([k,l]) => `<button data-repp="${k}" class="${REP.period===k?'on':''}">${l}</button>`).join('')}</div>
+    <p class="hint">Termina em ${fmtMonth(m)} (o mês aberto na aba Finanças).</p></div>
+  <div class="group">
+    <div class="balrow"><span>Período</span><b>${periodLabel(ms).replace(/^./, c => c.toUpperCase())}</b></div>
+    <div class="balrow"><span>Receitas</span><b class="money" style="color:var(--ok)">${money(D.recP)}</b></div>
+    <div class="balrow"><span>Despesas</span><b class="money" style="color:var(--danger)">− ${money(D.despP)}</b></div>
+    <div class="balrow tot"><span><b>Resultado</b></span><b class="money">${D.resP < 0 ? '− ' : ''}${money(Math.abs(D.resP))}</b></div>
+  </div>
+  <button class="btn block" data-act="report-go" style="margin-top:14px">${ic('i-down')}Gerar PDF</button>
+  <p class="hint" style="text-align:center">${isIOS() ? 'No iPhone, escolha “Salvar em Arquivos” ou envie por WhatsApp/e-mail.' : 'O arquivo será baixado ou aberto para compartilhar.'}</p>`);
+}
+async function genReport(){
+  const ms = reportMonths(REP.period, UI.finMonth || today().slice(0,7));
+  if (!window.jspdf) { toast('Preparando o PDF…'); try { await prepReport(); } catch(e){ toast('É preciso internet na 1ª vez para gerar o PDF'); return; } }
+  let doc;
+  try { doc = buildPDF(ms); } catch(e){ console.error(e); toast('Não foi possível gerar o PDF'); return; }
+  const name = `Pauta-DRE-${ms[0]}${ms.length > 1 ? '_a_' + ms[ms.length-1] : ''}.pdf`;
+  shareFile(name, doc.output('blob'), 'application/pdf');
+}
+
+function buildPDF(months){
+  const { jsPDF } = window.jspdf, doc = new jsPDF({ unit:'mm', format:'a4' });
+  const D = reportData(months), W = 210, L = 16, R = 194;
+  const C = { petrol:[11,59,66], ink:[13,47,53], muted:[96,118,117], line:[216,228,226], soft:[241,245,244], soft2:[226,236,234], cream:[249,243,226], gold:[212,175,55], red:[190,58,58], green:[18,128,94], white:[255,255,255], pale:[196,220,217] };
+  const fill = c => doc.setFillColor(...c), ink = c => doc.setTextColor(...c);
+  const font = (st, sz) => { doc.setFont('helvetica', st); doc.setFontSize(sz); };
+  const num = c => (Math.abs(c)/100).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 });
+  const n = c => c ? num(c) : '-';
+  const neg = c => c ? `(${num(c)})` : '-';
+  const sgn = c => c < 0 ? `(${num(c)})` : num(c);
+  const brl = c => (c < 0 ? '- ' : '') + 'R$ ' + num(c);
+  const pct = (a, b) => b ? (a/b*100).toLocaleString('pt-BR', { minimumFractionDigits:1, maximumFractionDigits:1 }) + '%' : '-';
+  const label = periodLabel(months), cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+  const now = new Date(), stamp = `${now.toLocaleDateString('pt-BR')} às ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  let y = 0;
+
+  function header(first){
+    fill(C.petrol); doc.rect(0, 0, W, first ? 38 : 20, 'F');
+    fill(C.gold); doc.rect(0, first ? 38 : 20, W, 0.9, 'F');
+    if (first) {
+      if (REP.logo) doc.addImage(REP.logo, 'PNG', L, 10, 27, 18);
+      ink(C.white); font('bold', 16); doc.text('Demonstrativo de Resultado', L + 33, 18);
+      ink(C.gold); font('normal', 9.5); doc.text('Finanças pessoais' + (S.name ? ' · ' + S.name : ''), L + 33, 25);
+      ink(C.white); font('bold', 11); doc.text(cap(label), R, 18, { align:'right' });
+      ink(C.pale); font('normal', 7.5); doc.text('Valores em R$ · regime de competência', R, 25, { align:'right' });
+    } else {
+      if (REP.logo) doc.addImage(REP.logo, 'PNG', L, 5, 15, 10);
+      ink(C.white); font('bold', 9.5); doc.text('Demonstrativo de Resultado · ' + cap(label), L + 19, 12);
+    }
+  }
+  const ensure = h => { if (y + h > 279) { doc.addPage(); header(false); y = 30; } };
+  const title = t => { ensure(18); y += 5; ink(C.petrol); font('bold', 9.5); doc.text(t, L, y); fill(C.gold); doc.rect(L, y + 1.8, 16, 0.8, 'F'); y += 6.5; };
+
+  header(true); y = 47;
+
+  // Cartões de resumo
+  const cw = (R - L - 8) / 3;
+  [['RECEITAS RECEBIDAS', D.recR, D.recP, C.green], ['DESPESAS PAGAS', D.despR, D.despP, C.red], ['RESULTADO REALIZADO', D.resR, D.resP, D.resR < 0 ? C.red : C.petrol]].forEach(([lb, r, p, col], i) => {
+    const x = L + i * (cw + 4);
+    fill(C.soft); doc.roundedRect(x, y, cw, 24, 2.5, 2.5, 'F');
+    fill(col); doc.rect(x, y + 4, 1.3, 16, 'F');
+    ink(C.muted); font('bold', 7); doc.text(lb, x + 5, y + 7.5);
+    ink(col); font('bold', 13); doc.text(brl(r), x + 5, y + 15);
+    ink(C.muted); font('normal', 7.5); doc.text('Previsto: ' + brl(p), x + 5, y + 20.5);
+  });
+  y += 32;
+
+  // Tabela DRE
+  const cP = 134, cR = 167, cA = R - 2, rh = 6.4;
+  function row(type, text, p, r, av){
+    const h = type === 'result' ? rh + 1.6 : type === 'head' ? 7.5 : rh;
+    ensure(h);
+    if (type === 'head') { fill(C.petrol); doc.rect(L, y, R - L, h, 'F'); ink(C.white); font('bold', 8);
+      doc.text(text, L + 3, y + 5); doc.text('Previsto', cP, y + 5, { align:'right' }); doc.text('Realizado', cR, y + 5, { align:'right' }); doc.text('% receita', cA, y + 5, { align:'right' }); y += h; return; }
+    if (type === 'group') { fill(C.soft2); doc.rect(L, y, R - L, h, 'F'); font('bold', 8.3); ink(C.ink); }
+    else if (type === 'total') { fill(C.cream); doc.rect(L, y, R - L, h, 'F'); font('bold', 8.3); ink(C.ink); }
+    else if (type === 'result') { fill(C.petrol); doc.rect(L, y, R - L, h, 'F'); font('bold', 9.3); ink(C.white); }
+    else { font('normal', 8.3); ink(C.ink); }
+    const ty = y + h / 2 + 1.2;
+    doc.text(text, type === 'item' ? L + 8 : L + 3, ty);
+    doc.text(p, cP, ty, { align:'right' }); doc.text(r, cR, ty, { align:'right' });
+    if (av) { if (type === 'item') ink(C.muted); doc.text(av, cA, ty, { align:'right' }); }
+    if (type === 'item') { doc.setDrawColor(...C.line); doc.setLineWidth(0.15); doc.line(L + 3, y + h, R - 3, y + h); }
+    if (type === 'result' && av) { fill(C.gold); doc.rect(L, y + h - 0.6, R - L, 0.6, 'F'); }
+    y += h;
+  }
+  title('DEMONSTRATIVO DO RESULTADO');
+  row('head', 'Descrição');
+  row('group', 'RECEITA BRUTA', n(D.recP), n(D.recR), pct(D.recP, D.recP));
+  const incRows = Object.entries(D.inc).filter(([,v]) => v.p || v.r).sort((a,b) => b[1].p - a[1].p);
+  if (incRows.length) incRows.forEach(([k,v]) => row('item', ICATS[k].label, n(v.p), n(v.r), pct(v.p, D.recP)));
+  else row('item', 'Nenhuma entrada lançada no período', '-', '-', '');
+  let acc = D.recP, accR = D.recR;
+  D.groups.forEach(g => {
+    const items = g.cats.filter(k => D.exp[k].p || D.exp[k].r);
+    const hasFin = g.key === 'fin' && (D.juros || D.desc);
+    if (g.p || g.r || items.length || hasFin) {
+      row('group', '(-) ' + g.label, neg(g.p), neg(g.r), pct(g.p, D.recP));
+      items.sort((a,b) => D.exp[b].p - D.exp[a].p).forEach(k => row('item', CATS[k].label, neg(D.exp[k].p), neg(D.exp[k].r), pct(D.exp[k].p, D.recP)));
+      if (g.key === 'fin' && D.juros) row('item', 'Juros e multas por atraso', neg(D.juros), neg(D.juros), pct(D.juros, D.recP));
+      if (g.key === 'fin' && D.desc) row('item', '(+) Descontos obtidos', n(D.desc), n(D.desc), pct(D.desc, D.recP));
+    }
+    acc -= g.p; accR -= g.r;
+    if (g.key === 'ess') row('total', '(=) SOBRA APÓS DESPESAS ESSENCIAIS', sgn(acc), sgn(accR), pct(acc, D.recP));
+  });
+  y += 1.5;
+  row('result', '(=) RESULTADO LÍQUIDO DO PERÍODO', sgn(D.resP), sgn(D.resR), pct(D.resP, D.recP));
+  y += 3;
+  ink(C.muted); font('normal', 7);
+  const note = doc.splitTextToSize('Previsto: tudo o que foi lançado no período (contas pela data de vencimento e entradas pela data prevista). Realizado: somente o que já foi pago ou recebido. Valores entre parênteses são saídas. % receita calculado sobre a receita prevista.', R - L);
+  ensure(note.length * 3.2); doc.text(note, L, y + 2.5); y += note.length * 3.2 + 2;
+
+  // Indicadores
+  title('INDICADORES');
+  const iw = (R - L - 12) / 4; ensure(24);
+  [['RENDA COMPROMETIDA', pct(D.despP, D.recP), 'despesas ÷ receitas'],
+   ['TAXA DE POUPANÇA', pct(D.resP, D.recP), 'resultado ÷ receitas'],
+   ['MAIOR DESPESA', D.top ? CATS[D.top[0]].label : '-', D.top ? brl(D.top[1].p) : ''],
+   ['CONTAS EM ABERTO', String(D.open.length), D.open.length ? brl(D.openSum) + (D.late.length ? ` · ${D.late.length} vencida${D.late.length>1?'s':''}` : '') : 'nenhuma']
+  ].forEach(([lb, v, sub], i) => {
+    const x = L + i * (iw + 4);
+    fill(C.soft); doc.roundedRect(x, y, iw, 21, 2, 2, 'F');
+    ink(C.muted); font('bold', 6.5); doc.text(lb, x + 3.5, y + 6);
+    ink(i === 1 && D.resP < 0 ? C.red : C.ink); font('bold', v.length > 12 ? 9.5 : 12); doc.text(doc.splitTextToSize(v, iw - 6)[0], x + 3.5, y + 12.8);
+    ink(i === 3 && D.late.length ? C.red : C.muted); font('normal', 6.8); doc.text(doc.splitTextToSize(sub, iw - 6)[0], x + 3.5, y + 17.6);
+  });
+  y += 25;
+
+  // Evolução mensal
+  if (months.length > 1) {
+    title('EVOLUÇÃO MENSAL (PREVISTO)');
+    const cols = [[L + 3, 'Mês', 'left'], [96, 'Receitas', 'right'], [128, 'Despesas', 'right'], [162, 'Resultado', 'right'], [R - 2, 'Poupança', 'right']];
+    ensure(8); fill(C.petrol); doc.rect(L, y, R - L, 7, 'F'); ink(C.white); font('bold', 8);
+    cols.forEach(([x, t, a]) => doc.text(t, x, y + 4.8, { align:a })); y += 7;
+    D.monthly.forEach((mo, i) => {
+      ensure(rh); if (i % 2) { fill(C.soft); doc.rect(L, y, R - L, rh, 'F'); }
+      const res = mo.rec - mo.desp; font('normal', 8.3); ink(C.ink);
+      doc.text(cap(fmtMonth(mo.mm, { month:'long', year:'numeric' })), L + 3, y + 4.4);
+      doc.text(n(mo.rec), 96, y + 4.4, { align:'right' }); doc.text(neg(mo.desp), 128, y + 4.4, { align:'right' });
+      ink(res < 0 ? C.red : C.ink); font('bold', 8.3); doc.text(sgn(res), 162, y + 4.4, { align:'right' });
+      ink(C.muted); font('normal', 8.3); doc.text(pct(res, mo.rec), R - 2, y + 4.4, { align:'right' });
+      y += rh;
+    });
+    const tr = sum(D.monthly, x => x.rec), td = sum(D.monthly, x => x.desp);
+    ensure(rh); fill(C.cream); doc.rect(L, y, R - L, rh, 'F'); ink(C.ink); font('bold', 8.3);
+    doc.text('Total', L + 3, y + 4.4); doc.text(n(tr), 96, y + 4.4, { align:'right' }); doc.text(neg(td), 128, y + 4.4, { align:'right' });
+    doc.text(sgn(tr - td), 162, y + 4.4, { align:'right' }); doc.text(pct(tr - td, tr), R - 2, y + 4.4, { align:'right' }); y += rh;
+  }
+
+  // Contas em aberto
+  if (D.open.length) {
+    title('CONTAS EM ABERTO NO PERÍODO');
+    const cols = [[L + 3, 'Vencimento', 'left'], [42, 'Descrição', 'left'], [112, 'Categoria', 'left'], [152, 'Situação', 'left'], [R - 2, 'Valor', 'right']];
+    ensure(8); fill(C.petrol); doc.rect(L, y, R - L, 7, 'F'); ink(C.white); font('bold', 8);
+    cols.forEach(([x, t, a]) => doc.text(t, x, y + 4.8, { align:a })); y += 7;
+    const t = today(), list = D.open.slice(0, 30);
+    list.forEach((b, i) => {
+      ensure(rh); if (i % 2) { fill(C.soft); doc.rect(L, y, R - L, rh, 'F'); }
+      font('normal', 8); ink(C.ink);
+      doc.text(fmtDate(b.due, { day:'2-digit', month:'2-digit', year:'numeric' }), L + 3, y + 4.4);
+      doc.text(doc.splitTextToSize(b.desc + (b.parc ? ` (${b.parc.i}/${b.parc.n})` : ''), 66)[0], 42, y + 4.4);
+      doc.text(catOf(b).label, 112, y + 4.4);
+      const late = b.due < t; ink(late ? C.red : C.muted); font(late ? 'bold' : 'normal', 8);
+      doc.text(late ? 'Vencida' : 'A vencer', 152, y + 4.4);
+      ink(C.ink); font('bold', 8); doc.text(n(b.amount), R - 2, y + 4.4, { align:'right' });
+      y += rh;
+    });
+    if (D.open.length > list.length) { ensure(6); ink(C.muted); font('normal', 7.5); doc.text(`… e mais ${D.open.length - list.length} contas em aberto.`, L + 3, y + 4.4); y += 6; }
+  }
+
+  // Rodapé
+  const pages = doc.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i);
+    fill(C.gold); doc.rect(L, 285, R - L, 0.4, 'F');
+    ink(C.muted); font('normal', 7);
+    doc.text(`Pauta · relatório gerado em ${stamp}`, L, 290);
+    doc.text(`Página ${i} de ${pages}`, R, 290, { align:'right' });
+  }
+  return doc;
+}
+
 // data padrão ao lançar: hoje, ou o mesmo dia no mês que está aberto na tela
 function finDefaultDate(){ const cur = today().slice(0,7), m = UI.finMonth || cur; return m === cur ? today() : addMonthsDay(today(), diffMonths(cur, m)); }
 function newFinChooser(){
@@ -1103,12 +1359,13 @@ function openSettings(){
 
   <div class="sec"><h2>Dados</h2></div>
   <div class="group">
+    <button class="gi" data-act="report"><span class="ico">${ic('i-note')}</span><span class="tx">Relatório financeiro (PDF)<small>Demonstrativo de resultado estilo DRE</small></span></button>
     <button class="gi" data-act="backup"><span class="ico">${ic('i-down')}</span><span class="tx">Fazer backup<small>Salva um arquivo com todos os itens</small></span></button>
     <label class="gi" style="cursor:pointer"><span class="ico">${ic('i-up')}</span><span class="tx">Restaurar backup<small>Carrega um arquivo salvo antes</small></span><input type="file" id="s-restore" accept=".json,application/json" hidden></label>
     <button class="gi" data-act="wipe"><span class="ico" style="color:var(--danger)">${ic('i-trash')}</span><span class="tx" style="color:var(--danger)">Apagar todos os dados</span></button>
   </div>
   <p class="hint">Seus dados ficam só neste aparelho. Faça backup de vez em quando.</p>
-  <p class="hint" style="text-align:center;margin-top:16px">Pauta · versão 1.4</p>`);
+  <p class="hint" style="text-align:center;margin-top:16px">Pauta · versão 1.5</p>`);
   $('#s-name').addEventListener('input', e => { S.name = e.target.value.trim(); save(); });
   $('#s-restore').addEventListener('change', restore);
 }
@@ -1302,6 +1559,7 @@ document.addEventListener('click', e => {
   if (ds.bkind) { readBill(); BE.kind = ds.bkind; drawBill(); return; }
   if (ds.bscope) { readBill(); BE.scope = ds.bscope; drawBill(); return; }
   if (ds.pmethod) { readPay(); PAY.method = ds.pmethod; drawPay(); return; }
+  if (ds.repp) { REP.period = ds.repp; drawReport(); return; }
   if (ds.rec) { e.stopPropagation(); const x = S.incomes.find(y=>y.id===ds.rec); if (x && x.received) unrec(x.id); else openRec(ds.rec); return; }
   if (ds.inc) { openInc(ds.inc); return; }
   if (ds.icat) { readInc(); IE.cat = ds.icat; drawInc(); return; }
@@ -1356,6 +1614,8 @@ document.addEventListener('click', e => {
     case 'notif-setup': enableNotif().then(ok => remindSetup(ok ? 'cal' : '')); break;
     case 'install-help': openSettings(); break;
     case 'install-off': S.installHintOff = true; save(); render(); break;
+    case 'report': openReport(); break;
+    case 'report-go': genReport(); break;
   }
 });
 $('#scrim').addEventListener('click', () => { if (S.onboarded) closeSheet(); });
