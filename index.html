@@ -504,8 +504,10 @@ function vHoje(){
     <div class="ring"><svg viewBox="0 0 76 76"><circle cx="38" cy="38" r="30" stroke="rgba(255,255,255,.15)" stroke-width="7" fill="none"/><circle cx="38" cy="38" r="30" stroke="#D4AF37" stroke-width="7" fill="none" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C*(1-pct/100)}" style="transition:stroke-dashoffset .5s"/></svg><div class="pct">${pct}%</div></div></div>
   <div class="stats"><div class="stat"><b>${total}</b><span>Hoje</span></div><div class="stat"><b>${meetings}</b><span>Reuniões</span></div><div class="stat"><b>${prazos7}</b><span>Prazos 7d</span></div><div class="stat ${late.length?'alert':''}"><b>${late.length}</b><span>Atrasados</span></div></div>`;
 
-  if (!S.notif && 'Notification' in window && Notification.permission !== 'denied')
-    html += `<div class="banner">${ic('i-bell')}<div><b>Ative os lembretes</b>Receba avisos de reuniões e prazos.</div><button class="btn sm" data-act="notif">Ativar</button></div>`;
+  if (isIOS() && !isStandalone() && !S.installHintOff)
+    html += `<div class="banner">${ic('i-phone')}<div><b>Instale na Tela de Início</b>No iPhone, os lembretes só funcionam com o app instalado.</div><button class="btn sm" data-act="install-help">Como</button><button class="iconbtn" style="width:30px;height:30px;box-shadow:none;background:none" data-act="install-off" aria-label="Dispensar">${ic('i-x')}</button></div>`;
+  else if (!S.notif && 'Notification' in window && Notification.permission !== 'denied')
+    html += `<div class="banner">${ic('i-bell')}<div><b>Ative os lembretes</b>Receba avisos de reuniões, prazos e contas.</div><button class="btn sm" data-act="remind-setup">Ativar</button></div>`;
 
   const nm = occ.find(it => it.type==='reuniao' && !isDone(it,t) && it.time && (it.end || it.time) >= nowHM());
   if (nm) {
@@ -1106,11 +1108,30 @@ function openSettings(){
     <button class="gi" data-act="wipe"><span class="ico" style="color:var(--danger)">${ic('i-trash')}</span><span class="tx" style="color:var(--danger)">Apagar todos os dados</span></button>
   </div>
   <p class="hint">Seus dados ficam só neste aparelho. Faça backup de vez em quando.</p>
-  <p class="hint" style="text-align:center;margin-top:16px">Pauta · versão 1.3</p>`);
+  <p class="hint" style="text-align:center;margin-top:16px">Pauta · versão 1.4</p>`);
   $('#s-name').addEventListener('input', e => { S.name = e.target.value.trim(); save(); });
   $('#s-restore').addEventListener('change', restore);
 }
 
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+// Tela de ativação dos lembretes (abre sozinha na 1ª vez que o app é aberto pela Tela de Início)
+function remindSetup(step){
+  S.remindAsked = true; save();
+  const granted = 'Notification' in window && Notification.permission === 'granted' && S.notif;
+  const denied = 'Notification' in window && Notification.permission === 'denied';
+  openSheet(`
+  <div class="sh-head"><h3>Lembretes no celular</h3><button class="iconbtn" data-act="close" aria-label="Fechar">${ic('i-x')}</button></div>
+  <div class="group">
+    <div class="gi"><span class="ico" style="${granted?'color:var(--ok)':''}">${ic(granted?'i-check':'i-bell')}</span><span class="tx"><b>1. Avisos do app</b><small>${granted ? 'Ativados ✓' : denied ? 'Bloqueados — libere em Ajustes do iPhone › Notificações › Pauta' : 'Avisam reuniões, prazos e contas enquanto o app está em uso ou foi aberto há pouco.'}</small></span>
+      ${granted || denied ? '' : `<button class="btn sm" data-act="notif-setup">Ativar</button>`}</div>
+    <div class="gi"><span class="ico">${ic('i-calplus')}</span><span class="tx"><b>2. Calendário do celular</b><small>Garante o alarme mesmo com o app fechado. Repita sempre que lançar coisas novas.</small></span>
+      <button class="btn sm ${step==='cal'?'':'ghost'}" data-act="ics-all">Enviar</button></div>
+  </div>
+  <p class="hint">${isIOS() ? 'No iPhone, o sistema só deixa o app avisar quando ele está aberto ou foi usado há pouco. Por isso o passo 2 é o que garante o alarme.' : 'Os avisos do app aparecem quando ele está aberto ou em segundo plano. O passo 2 garante o alarme mesmo com o celular bloqueado.'}</p>
+  <button class="btn ghost block" style="margin-top:12px" data-act="close">${granted ? 'Pronto' : 'Agora não'}</button>`);
+}
 async function enableNotif(){
   if (!('Notification' in window)) { toast('Este navegador não suporta notificações. Use “Enviar ao Calendário”.'); return; }
   let p = Notification.permission;
@@ -1118,6 +1139,7 @@ async function enableNotif(){
   if (p === 'granted') { S.notif = true; save(); notify('Lembretes ativados', 'Você será avisado(a) das reuniões, prazos e rotinas.'); toast('Lembretes ativados'); }
   else toast(/iphone|ipad/i.test(navigator.userAgent) && !navigator.standalone ? 'No iPhone, instale o app na Tela de Início primeiro' : 'Permissão negada nas configurações do aparelho');
   render(); if ($('#sheet').classList.contains('on') && $('#s-name')) openSettings();
+  return p === 'granted';
 }
 async function notify(title, body, tag){
   try {
@@ -1243,6 +1265,13 @@ function finishWelcome(demo){
   S.name = ($('#w-name').value||'').trim(); S.onboarded = true;
   if (demo) seed();
   save(); closeSheet(); render();
+  maybeRemindSetup();
+}
+// Instalado e ainda sem resposta sobre lembretes → pergunta uma vez
+function maybeRemindSetup(){
+  if (!S.onboarded || !isStandalone() || S.remindAsked) return;
+  if (!('Notification' in window) || Notification.permission !== 'default') return;
+  setTimeout(() => { if (!$('#sheet').classList.contains('on')) remindSetup(); }, 700);
 }
 function seed(){
   const t = today(), mk = o => Object.assign({ id:uid(), created:Date.now(), title:'', date:t, time:'', end:'', repeat:'none', days:[], remind:-1, priority:'media', location:'', people:'', notes:'', doing:false, done:false, doneDates:[] }, o);
@@ -1323,6 +1352,10 @@ document.addEventListener('click', e => {
     case 'wipe': if (confirm('Apagar TODOS os itens e contas? Isso não pode ser desfeito.')) { S.items = []; S.bills = []; S.incomes = []; S.fired = {}; save(); closeSheet(); render(); toast('Dados apagados'); } break;
     case 'w-start': finishWelcome(false); break;
     case 'w-demo': finishWelcome(true); break;
+    case 'remind-setup': remindSetup(); break;
+    case 'notif-setup': enableNotif().then(ok => remindSetup(ok ? 'cal' : '')); break;
+    case 'install-help': openSettings(); break;
+    case 'install-off': S.installHintOff = true; save(); render(); break;
   }
 });
 $('#scrim').addEventListener('click', () => { if (S.onboarded) closeSheet(); });
@@ -1332,6 +1365,9 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) { ex
 /* ============ Início ============ */
 extendRecurring(); applyTheme(); render();
 if (!S.onboarded) welcome();
+// se o aparelho já permitiu avisos, liga sozinho
+if ('Notification' in window && Notification.permission === 'granted' && !S.notif) { S.notif = true; save(); render(); }
+maybeRemindSetup();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(()=>{});
 checkReminders();
 setInterval(() => { checkReminders(); if (UI.tab === 'hoje' && !$('#sheet').classList.contains('on')) render(); }, 30000);
