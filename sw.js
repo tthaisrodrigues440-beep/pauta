@@ -1,5 +1,5 @@
 // Cache do app para funcionar offline. Mude VERSION a cada publicação.
-const VERSION = 'pauta-v1-20261022';
+const VERSION = 'pauta-v1.1-20261022';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png', './icon-180.png'];
 
 self.addEventListener('install', e => {
